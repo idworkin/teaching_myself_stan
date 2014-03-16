@@ -25,6 +25,9 @@ dll.data = read.csv("dll.txt", header=TRUE)   #data frame input
 # For purposes of these tests I am going to use a cleaned subset of the data.
 dll.data <- na.omit(dll.data)
 dll.data$genotype <- relevel(dll.data$genotype, "wt")
+dll.data$temp <- as.factor(dll.data$temp)
+dll.data$replicate <- as.factor(dll.data$replicate)
+
 
 # Simple regression of SCT on tarsus
 mod1 <- lm(SCT ~ tarsus, data=dll.data)
@@ -184,11 +187,21 @@ fit2_v2t <- stan(fit = fit_v2t, data = model_dat2, iter = 20000, chains = 4)
 print(fit2_v2t)
 plot(fit2_v2t)
 
+
 ## Adding an additional covariate to the model (genotype)
 
 mod2 <- lm(SCT ~ scale(tarsus,scale=FALSE) + genotype, data=dll.data)
 niceLM(mod2)
 summary(mod2)
+
+# I am not sure this is the best way, but I will just use the design matrix for the data inputs
+mod2_design <- with(dll.data, model.matrix( ~ tarsus + genotype))
+
+model_dat3 <- list(N=nrow(mod2_design),
+    SCT=dll.data$SCT,
+    tarsus=mod2_design[,2],
+    genotype=mod2_design[,3]) 
+
 
 stan_mod2 <- '
   data {
@@ -211,20 +224,140 @@ stan_mod2 <- '
 
   model {
    for (p in 1:3) {
-       beta[p] ~ normal(0, 100); // prior on the intercept
+       beta[p] ~ normal(0, 100); // priors for each beta
        }
-   SCT ~ normal(beta[1] + beta[2] * c_tarsus + beta[3]*genotype, sigma); //normal regression model 
+   SCT ~ normal(beta[1] + beta[2]*c_tarsus + beta[3]*genotype, sigma); //normal regression model 
   }
 '
 
-model_dat3 <- list(N=length(dll.data$SCT),
-    SCT=dll.data$SCT,
-    tarsus=dll.data$tarsus,
-    genotype=(as.numeric(dll.data$genotype)-1)) # Temporary workaround
+stan_fit_mod2 <- stan(model_code = stan_mod2, data = model_dat3, iter = 1000, chains = 1)    
 
-stan_fit_mod2 <- stan(model_code = stan_mod2, data = model_dat3,iter = 1000, chains = 1)    
-
-stan_fit2_mod2 <- stan(fit = stan_fit_mod2, data = model_dat3, iter = 10000, chains = 4)
+stan_fit2_mod2 <- stan(fit = stan_fit_mod2, data = model_dat3, iter = 10000, chains = 2)
 
 print(stan_fit2_mod2)
 plot(stan_fit2_mod2)
+
+
+## Adding all the covariates (except line) and their interactions
+
+mod3 <- lm(SCT ~ scale(tarsus,scale=FALSE) + genotype + temp + genotype:temp + replicate,
+    data=dll.data)
+    
+niceLM(mod3)
+summary(mod3)
+
+# design matrix (tarsus not scaled) for ease of use in STAN
+
+mod3_design <- with(dll.data, 
+    model.matrix( ~ tarsus + genotype + temp + genotype:temp + replicate))
+
+model_dat3 <- list(N=nrow(mod3_design),
+    SCT=dll.data$SCT,
+    tarsus=mod3_design[,2],
+    genotype=mod3_design[,3],
+    temp=mod3_design[,4],
+    genoXtemp=mod3_design[,5],
+    replicate=mod3_design[,6]) 
+
+
+stan_mod3 <- '
+  data {
+    int<lower=0> N; // number of observations 
+    vector<lower=0>[N] SCT; // response variable
+    vector[N] tarsus; // predictor variables
+    vector<lower=0>[N] genotype;
+    vector<lower=0>[N] temp;
+    vector<lower=0>[N] genoXtemp;
+    vector<lower=0>[N] replicate;
+  }
+  
+  transformed data {
+  	vector[N] c_tarsus; // centered predictor
+  	c_tarsus <- tarsus - mean(tarsus);
+  }
+  
+  parameters { 
+    vector[6] beta; // For all predictors including the interaction
+    real <lower=0, upper=100> sigma; // addition upper constraint on sigma.
+  }
+  
+
+  model {
+   for (p in 1:6) {
+       beta[p] ~ normal(0, 100); // priors for each beta
+       }
+   SCT ~ normal(beta[1] + beta[2]*c_tarsus + beta[3]*genotype + beta[4]*temp + beta[5]*genoXtemp + beta[6]*replicate, sigma);
+  }
+'
+
+stan_fit_mod3 <- stan(model_code = stan_mod3, data = model_dat3, iter = 1000, chains = 1)    
+
+stan_fit2_mod3 <- stan(fit = stan_fit_mod3, data = model_dat3, iter = 20000, chains = 1)
+
+print(stan_fit2_mod3)
+plot(stan_fit2_mod3)
+
+
+## Treating SCT as count data (using poisson, nb, over-dispersion etc)
+#### Will start with the model we just used.
+
+mod3_poisson <- glm(SCT ~ scale(tarsus,scale=FALSE) + genotype + temp + genotype:temp + replicate,
+    family=poisson, data=dll.data)
+    
+niceLM(mod3_poisson)
+summary(mod3_poisson)
+
+# design matrix (tarsus not scaled) for ease of use in STAN
+
+mod3_design <- with(dll.data, 
+    model.matrix( ~ tarsus + genotype + temp + genotype:temp + replicate))
+
+model_dat3 <- list(N=nrow(mod3_design),
+    SCT=dll.data$SCT,
+    tarsus=mod3_design[,2],
+    genotype=mod3_design[,3],
+    temp=mod3_design[,4],
+    genoXtemp=mod3_design[,5],
+    replicate=mod3_design[,6]) 
+
+
+stan_mod3_pois <- '
+  data {
+    int<lower=0> N; // number of observations 
+    int<lower=0> SCT[N]; // response variable as a vector of integers now
+    vector[N] tarsus; // predictor variables
+    vector<lower=0>[N] genotype;
+    vector<lower=0>[N] temp;
+    vector<lower=0>[N] genoXtemp;
+    vector<lower=0>[N] replicate;
+  }
+  
+  transformed data {
+  	vector[N] c_tarsus; // centered predictor
+  	c_tarsus <- tarsus - mean(tarsus);
+  }
+  
+  parameters { 
+    vector[6] beta; // For all predictors including the interaction
+    real <lower=0, upper=100> sigma; // addition upper constraint on sigma.
+  }
+  
+
+  model {
+   for (p in 1:6) {
+       beta[p] ~ normal(0, 100); // priors for each beta
+       }
+       
+      // changed distribution to poisson_log (i.e. exp(...)). No variance (sigma) term 
+      
+   SCT ~ poisson_log(beta[1] + beta[2]*c_tarsus + beta[3]*genotype + beta[4]*temp + 
+             beta[5]*genoXtemp + beta[6]*replicate);
+  }
+'
+
+stan_fit_mod3_pois <- stan(model_code = stan_mod3_pois, data = model_dat3, iter = 1000, chains = 1)    
+print(stan_fit_mod3_pois)
+stan_fit2_mod3_pois <- stan(fit = stan_fit_mod3_pois, data = model_dat3, iter = 20000, chains = 1)
+
+print(stan_fit2_mod3_pois)
+plot(stan_fit2_mod3)
